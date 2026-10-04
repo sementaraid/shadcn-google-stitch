@@ -3,13 +3,34 @@ import { fileURLToPath } from 'node:url'
 import { ICON_FONT, type FontUsage, type IR, type IconShape, type NodeIR, type RepeatInfo } from './types.ts'
 import type { Ingested } from './ingest.ts'
 import { canonicalName, toPascal } from './classify/icon.ts'
+import { all as allCssProperties } from 'known-css-properties'
 
-export const STYLE_PROPS = [
-  'display', 'position', 'flexDirection', 'alignItems', 'justifyContent', 'gap',
-  'width', 'height', 'padding', 'margin', 'borderRadius', 'borderWidth', 'borderColor', 'backgroundColor',
-  'background', 'color', 'fontSize', 'fontWeight', 'fontFamily', 'lineHeight',
-  'letterSpacing', 'boxShadow', 'opacity', 'overflow', 'cursor', 'zIndex',
-  'gridTemplateColumns',
+/**
+ * Every CSS property name the platform defines, from `known-css-properties`
+ * (generated from the MDN data). Passed to `getComputedStyle.getPropertyValue`,
+ * which is case-insensitive and ignores the vendor-prefixed entries this engine
+ * does not implement, so a superset costs nothing but a dictionary lookup each.
+ *
+ * The list is deliberately NOT hand-picked. A fixed 27-property list cannot hold
+ * `top`/`right`/`bottom`, per-side border widths, `max-width` or `white-space`,
+ * and a node positioned by one of those rendered in the wrong place with nothing
+ * in the IR to reconstruct it from.
+ */
+export const STYLE_PROPS: readonly string[] = allCssProperties
+
+/**
+ * Recorded even at their initial value. These are the properties every consumer
+ * reads unconditionally (`nums(style.padding)`), so a missing key would be a
+ * crash rather than an absent style; the rest of the record stays sparse.
+ */
+export const CORE_STYLE_PROPS = [
+  'display', 'position', 'flex-direction', 'align-items', 'justify-content', 'gap',
+  'width', 'height', 'padding', 'margin', 'border-radius', 'border-width',
+  'border-color', 'border-style', 'background-color', 'color', 'font-size',
+  'font-weight', 'font-family', 'line-height', 'letter-spacing', 'box-shadow',
+  'opacity', 'overflow', 'cursor', 'z-index', 'grid-template-columns',
+  'top', 'right', 'bottom', 'left', 'max-width', 'min-width', 'max-height', 'min-height',
+  'flex-wrap', 'white-space', 'text-align', 'text-transform', 'text-overflow',
 ] as const
 
 type RawNode = Omit<NodeIR, 'repeat' | 'cropPath' | 'ligature'>
@@ -73,6 +94,7 @@ interface WalkResult {
   rootId: string
   colors: IR['colors']
   fonts: FontUsage[]
+  usedProps: string[]
 }
 
 const WALKER_SRC = fileURLToPath(new URL('./walker.browser.js', import.meta.url))
@@ -86,7 +108,7 @@ async function loadWalker(): Promise<string> {
   // not exist in the browser context.
   if (walkerFn === null) {
     const src = await readFile(WALKER_SRC, 'utf8')
-    walkerFn = `(() => { ${src}\nreturn walkPage(${JSON.stringify(STYLE_PROPS)}); })()`
+    walkerFn = `(() => { ${src}\nreturn walkPage(${JSON.stringify(STYLE_PROPS)}, ${JSON.stringify(CORE_STYLE_PROPS)}); })()`
   }
   return walkerFn
 }
@@ -160,11 +182,11 @@ export function detectRepeats(nodes: Record<string, NodeIR>): void {
 
 export async function extract(ing: Ingested): Promise<IR> {
   const script = await loadWalker()
-  const { nodes: raw, rootId, colors, fonts } = (await ing.page.evaluate(script)) as WalkResult
+  const { nodes: raw, rootId, colors, fonts, usedProps } = (await ing.page.evaluate(script)) as WalkResult
 
   const nodes: Record<string, NodeIR> = {}
   for (const n of raw) {
-    nodes[n.id] = { ...n, repeat: null, ligature: null, cropPath: null, textAt: n.text && (n.textAt ?? -1) >= 0 ? n.textAt : null }
+    nodes[n.id] = { ...n, repeat: null, ligature: null, cropPath: null, textAt: n.text && (n.textAt ?? -1) >= 0 ? n.textAt : null, textRuns: n.text ? (n.textRuns ?? null) : null }
   }
 
   // Before repeat detection: a promoted ligature changes the node's identity, and
@@ -184,6 +206,7 @@ export async function extract(ing: Ingested): Promise<IR> {
     colors: [...colors].sort((a, b) => b.area - a.area).slice(0, 64),
     fonts: [...fonts].sort((a, b) => b.count - a.count),
     fontSubstituted,
+    usedProps,
     nodes,
     root: rootId,
   }

@@ -1,10 +1,75 @@
 // Runs inside the page. Plain JS on purpose: a transpiled bundle (tsx/esbuild)
 // injects a `__name` helper that does not exist in the browser context.
 // Keep this file dependency-free and CommonJS-free.
-function walkPage(styleProps) {
+/**
+ * `background-color` -> `backgroundColor`. The IR's style record is read as
+ * `style.backgroundColor` everywhere downstream, so names are camelCased once
+ * here rather than at every read site. Custom properties (`--x`) are left alone.
+ */
+function camelize(p) {
+  if (p.charCodeAt(0) === 45 && p.charCodeAt(1) === 45) return p
+  return p.replace(/-([a-z])/g, function (_, c) {
+    return c.toUpperCase()
+  })
+}
+
+function walkPage(styleProps, alwaysKeep) {
+  // The CSS initial value per property, read once from a detached element. This
+  // is the baseline that makes "uses this property" meaningful: every element
+  // reports a computed value for all ~1300 properties, and `display: block` on a
+  // div says nothing, while `display: flex` says everything.
+  var INITIAL = (function () {
+    var el = document.createElement('div')
+    var cs = getComputedStyle(el)
+    var out = {}
+    for (var i = 0; i < styleProps.length; i++) out[styleProps[i]] = cs.getPropertyValue(styleProps[i])
+    return out
+  })()
+  // A small core set is recorded even when it sits at its initial value, because
+  // a consumer reading `padding` wants the resolved `0px`, not a missing key.
+  // Everything else is kept only when it differs from initial.
+  var KEEP = {}
+  for (var i = 0; i < alwaysKeep.length; i++) KEEP[camelize(alwaysKeep[i])] = true
+
   var nodes = []
   var colorAgg = {}
   var fontAgg = {}
+  // Per node, the computed-style properties that actually vary from the CSS
+  // initial value. A fixed list is always wrong by omission: it cannot hold
+  // `top`/`right`, per-side `border-*-width`, `max-width` or `white-space`, and
+  // a node whose position depends on one of those renders in the wrong place
+  // with nothing in the IR to explain why. Keeping every non-initial property
+  // means the record is a superset of the true style, and any consumer (emitter,
+  // diff, patch) can ask for what it needs. `style` stays keyed the same way, so
+  // `style.top` is read exactly like `style.display`.
+  var csCache = []
+  var csIndex = {}
+  var declaredAgg = {}
+  function usedComputedStyle(cs) {
+    var out = {}
+    // The core set is read *by name* first. `CSSStyleDeclaration`'s indexed
+    // iteration lists longhands only, so every shorthand — `padding`, `margin`,
+    // `border-radius`, `border-width`, `gap`, `overflow`, `background` — is
+    // simply absent from it, however it is spelled. Asking for the shorthand by
+    // name is the only way to see its serialized value.
+    for (var k = 0; k < alwaysKeep.length; k++) {
+      var name = alwaysKeep[k]
+      var cv = cs.getPropertyValue(name)
+      if (cv === '') continue
+      out[camelize(name)] = cv
+      declaredAgg[name] = (declaredAgg[name] || 0) + 1
+    }
+    // Then every other property whose value is not its initial one.
+    for (var i = 0; i < cs.length; i++) {
+      var p = cs[i]
+      if (KEEP[camelize(p)]) continue
+      var v = cs.getPropertyValue(p)
+      if (v === '' || v === INITIAL[p]) continue
+      out[camelize(p)] = v
+      declaredAgg[p] = (declaredAgg[p] || 0) + 1
+    }
+    return out
+  }
   var opaque = { svg: 1, canvas: 1, img: 1, video: 1, picture: 1, iframe: 1 }
   var TRANSPARENT = { 'rgba(0, 0, 0, 0)': 1, transparent: 1 }
 
@@ -39,7 +104,14 @@ function walkPage(styleProps) {
     // The index of the element child the text precedes is returned too: the IR
     // keeps text and children in separate lists, and without it `<svg/>Label`
     // and `Label<svg/>` emit the same JSX.
+    //
+    // `runs` keeps one entry per gap *between* element children (length =
+    // elementChildren + 1). The flattened `text` above cannot say where a span
+    // sat inside a sentence — `a <b>c</b> d` and `a c d <b>…</b>` collapse to
+    // the same string — so the emitter needs the gaps to put each back.
     var out = ''
+    var buf = ''
+    var runs = []
     var at = 0
     var seenText = false
     for (var i = 0; i < el.childNodes.length; i++) {
@@ -47,12 +119,17 @@ function walkPage(styleProps) {
       if (n.nodeType === 3) {
         if ((n.nodeValue || '').trim().length && !seenText) seenText = true
         out += n.nodeValue || ''
-      } else if (n.nodeType === 1 && !seenText) {
-        at++
+        buf += n.nodeValue || ''
+      } else if (n.nodeType === 1) {
+        runs.push(buf)
+        buf = ''
+        if (!seenText) at++
       }
     }
+    runs.push(buf)
     var t = out.replace(/\s+/g, ' ').trim()
-    return { text: t.length ? t : null, at: seenText ? at : -1 }
+    var norm = function (r) { return r.replace(/\s+/g, ' ').trim() }
+    return { text: t.length ? t : null, at: seenText ? at : -1, runs: runs.map(norm) }
   }
 
   function classify(el, tag, cs, rect, ownText, childCount, opaqueLeaf) {
@@ -77,8 +154,7 @@ function walkPage(styleProps) {
   function visit(el, parentId, depth) {
     var cs = getComputedStyle(el)
     var rect = el.getBoundingClientRect()
-    var style = {}
-    for (var i = 0; i < styleProps.length; i++) style[styleProps[i]] = cs[styleProps[i]] || ''
+    var style = usedComputedStyle(cs)
 
     var id = nextId()
     var childEls = el.children
@@ -112,8 +188,12 @@ function walkPage(styleProps) {
       role: el.getAttribute('role'),
       ariaLabel: el.getAttribute('aria-label'),
       placeholder: el.getAttribute('placeholder'),
+      // An `<a>` emitted without its `href` is inert — the source anchor's link
+      // target is part of what the element *is*, and no style can put it back.
+      href: el.getAttribute('href'),
       text: ownText,
       textAt: own.at,
+      textRuns: own.runs,
       box: {
         x: Math.round(rect.x * 100) / 100,
         y: Math.round(rect.y * 100) / 100,
@@ -183,6 +263,7 @@ function walkPage(styleProps) {
   }
 
   function findRoot() {
+
     var body = document.body
     var visible = []
     for (var i = 0; i < body.children.length; i++) {
@@ -206,5 +287,11 @@ function walkPage(styleProps) {
     return { family: family, weights: weights, count: v.count, heading: v.heading }
   })
 
-  return { nodes: nodes, rootId: rootId, colors: colors, fonts: fonts }
+  // Sorted by how many nodes use each, so the head of the list is the page's
+  // real vocabulary and the tail is one-off noise.
+  var usedProps = Object.keys(declaredAgg).sort(function (a, b) {
+    return declaredAgg[b] - declaredAgg[a]
+  })
+
+  return { nodes: nodes, rootId: rootId, colors: colors, fonts: fonts, usedProps: usedProps }
 }

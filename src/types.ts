@@ -7,13 +7,23 @@ export interface Box {
   h: number
 }
 
-export interface StyleSubset {
+/**
+ * A resolved value for a CSS property, keyed the way `getComputedStyle` lists
+ * it (`background-color`, `border-top-width`, `flex-direction`).
+ *
+ * This was a hand-picked 27-property interface. The list is always wrong by
+ * omission — it cannot carry `top`/`right`/`bottom`, per-side border widths,
+ * `max-width`, `white-space` or `flex-wrap`, so a node positioned by one of
+ * those had nothing in the IR to reconstruct it from and rendered in the wrong
+ * place. The walker now keeps every property whose computed value differs from
+ * the CSS initial value, and the IR records which of them the page used.
+ */
+export type ComputedStyle = Record<string, string>
+
+export interface StyleSubset extends ComputedStyle {
+  /** The core set is recorded even at its initial value; see `CORE_STYLE_PROPS`. */
   display: string
   position: string
-  flexDirection: string
-  alignItems: string
-  justifyContent: string
-  gap: string
   width: string
   height: string
   padding: string
@@ -21,20 +31,12 @@ export interface StyleSubset {
   borderRadius: string
   borderWidth: string
   borderColor: string
-  background: string
   backgroundColor: string
   color: string
   fontSize: string
   fontWeight: string
   fontFamily: string
   lineHeight: string
-  letterSpacing: string
-  boxShadow: string
-  opacity: string
-  overflow: string
-  cursor: string
-  zIndex: string
-  gridTemplateColumns: string
 }
 
 export interface RepeatInfo {
@@ -91,6 +93,8 @@ export interface NodeIR {
   ariaLabel: string | null
   /** An `<input>`'s placeholder is visible text and the pixel diff measures it. */
   placeholder: string | null
+  /** An `<a>`'s link target; the tag carries no meaning without it. */
+  href: string | null
   text: string | null
   /**
    * Where this node's own text sits among its element children: `0` before all
@@ -99,6 +103,14 @@ export interface NodeIR {
    * `Overview<svg/>` — same content, mirrored layout.
    */
   textAt: number | null
+  /**
+   * The node's own text split at its element children: `runs[i]` is the text
+   * before child `i`, `runs[children.length]` the text after the last. Length is
+   * always `children.length + 1` when present. `text` cannot say where a span
+   * sat inside a sentence — `a <b>c</b> d` and `a c d <b>…</b>` flatten alike —
+   * so the emitter uses these to put each run back between its neighbours.
+   */
+  textRuns: string[] | null
   box: Box
   style: StyleSubset
   children: string[]
@@ -131,6 +143,8 @@ export interface IR {
   viewport: { width: number; height: number }
   colors: { value: string; count: number; area: number }[]
   fonts: FontUsage[]
+  /** Computed-style properties the page actually uses, most-used first. */
+  usedProps: readonly string[]
   fontSubstituted: string[]
   nodes: Record<string, NodeIR>
   root: string

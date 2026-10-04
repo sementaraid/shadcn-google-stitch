@@ -1,6 +1,6 @@
 import type { Classification, IconChild, IconMatch, IR, NodeIR } from '../types.ts'
 import { SHADCN } from '../registry/shadcn/index.generated.ts'
-import { classNames, textClasses, usePalette } from './classname.ts'
+import { chromeOverrides, classNames, positionClasses, textClasses, typeClasses, usePalette } from './classname.ts'
 import { assignPalette, colorUses, pageBackground } from './colors.ts'
 
 /**
@@ -75,6 +75,8 @@ interface Ctx {
   /** Template node id -> the slots standing in for it (text, class, variant). */
   slots: Map<string, Slot[]>
   usedNames: Set<string>
+  /** Node ids inside a subtree whose layout changes with viewport width. */
+  varying: Set<string>
 }
 
 /** The slot of a given kind on a node, if any. */
@@ -132,6 +134,147 @@ function isComponent(n: NodeIR, ctx: Ctx): boolean {
 }
 
 /**
+ * A utility that names a concrete width, as opposed to one the layout derives.
+ *
+ * `min-w-*` and `max-w-*` are deliberately absent: they floor and cap a width
+ * without setting one, so `max-w-[1200px] mx-auto` still fills its parent and
+ * has to be emitted beside `w-full` or it freezes at whatever the viewport was.
+ * Fractions (`w-1/2`) are absent for the same reason — anchored at the end so
+ * the numerator alone does not read as a pixel count.
+ */
+const NAMED_WIDTH = /^w-(\[.+\]|0|px|\d+(?:\.\d+)?)$|^basis-(\[.+\]|\d+)$/
+
+/**
+ * A utility that names a concrete height, as opposed to one the content derives.
+ *
+ * Used only inside a breakpoint-varying subtree (see `breakpointVarying`): there
+ * the measured height is one branch and freezing it is the whole bug, so a node
+ * that did not name a height leaves the axis to the flow. `min-h`/`max-h` are
+ * absent for the same reason as their width twins — they bound without setting.
+ */
+const NAMED_HEIGHT = /^h-(\[.+\]|0|px|screen|full|auto|\d+(?:\.\d+)?)$/
+
+/**
+ * The node ids whose rendered layout depends on the viewport width.
+ *
+ * A capture happens at one width, so any element whose source carried a
+ * breakpoint prefix has branches the capture never saw. Those branches change
+ * how big the subtree is — a one-column hero is twice as tall as a two-column
+ * one — so a *measured* height inside such a subtree is the capture's branch,
+ * not the layout's size, and freezing it makes the page render the narrow
+ * layout at every width. Width already has this split (`NAMED_WIDTH` vs
+ * derived); height needs it too, but only here: outside these subtrees the
+ * measured height is the real one and dropping it would collapse the box.
+ *
+ * The set is closed upward and downward: an ancestor's size is what its
+ * breakpoint-varying descendants made it, and a descendant of such a node may
+ * still be inside the varying region.
+ */
+function breakpointVarying(ir: IR): Set<string> {
+  const out = new Set<string>()
+  const RESPONSIVE = /^(?:sm|md|lg|xl|2xl):/
+  const marked: string[] = []
+  for (const id of Object.keys(ir.nodes)) {
+    const n = ir.nodes[id]
+    if (!n?.visible) continue
+    if ((n.classList ?? []).some((c) => RESPONSIVE.test(c))) {
+      out.add(id)
+      marked.push(id)
+    }
+  }
+  // Up: an ancestor's box is a function of the branches beneath it. Down: the
+  // varying region continues into a marked element's own subtree. `descended`
+  // is separate from `out` so a node an `up` pass already claimed does not stop
+  // the `down` pass from reaching its children.
+  const descended = new Set<string>()
+  const up = (id: string) => {
+    let p = ir.nodes[id]?.parent
+    while (p && !out.has(p)) {
+      out.add(p)
+      p = ir.nodes[p]?.parent
+    }
+  }
+  const down = (id: string) => {
+    for (const c of ir.nodes[id]?.children ?? []) {
+      if (descended.has(c)) continue
+      descended.add(c)
+      out.add(c)
+      down(c)
+    }
+  }
+  for (const id of marked) {
+    up(id)
+    down(id)
+  }
+  return out
+}
+
+/**
+ * Horizontal edges both pinned — the offsets size the box, no width belongs.
+ *
+ * Only a positioned box is edged this way; `left`/`right` on a static element
+ * are inert, and `positionClasses` emits them for `absolute`/`fixed` alone.
+ */
+function edgesPinned(n: NodeIR): boolean {
+  if (n.style.position !== 'absolute' && n.style.position !== 'fixed') return false
+  const pinned = (v: string | undefined) => Boolean(v) && v !== 'auto'
+  return pinned(n.style.left) && pinned(n.style.right)
+}
+
+/** Every place `classNames` is called, so the source class list is never forgotten. */
+function widthOpts(
+  n: NodeIR,
+  ctx: Ctx,
+): { fillsWidth: boolean; skipWidth: boolean; sourceClasses: string[]; flowHeight: boolean } {
+  return {
+    fillsWidth: fillsWidth(n, ctx),
+    skipWidth: edgesPinned(n),
+    sourceClasses: n.classList,
+    flowHeight: ctx.varying.has(n.id),
+  }
+}
+
+/**
+ * Whether a node's measured width is its parent's content width rather than a
+ * size the page asked for.
+ *
+ * The page's own class list is the truth here, and it is the only thing that
+ * separates the two cases — geometry cannot: `max-w-[1200px] mx-auto` measures
+ * exactly its parent's content width at a 964px viewport, and so does a
+ * `w-full` bar. A node whose source named a width (or a fixed `flex` basis)
+ * keeps that name; one that named a relative width, or none at all, is filling.
+ *
+ * ponytail: only the horizontal axis. Height is left alone because a container
+ * that grows to fit its children is indistinguishable from a `h-full` child
+ * without the source's own height utility, and guessing wrong there collapses
+ * the box. Add it when a fixture shows a stretched child.
+ */
+function fillsWidth(n: NodeIR, ctx: Ctx): boolean {
+  // A text leaf is emitted as a shrink-wrapped `<span>` with the type scale, and
+  // `textClasses` never reads the box — a `w-full` on it would be inert.
+  if (n.text && !n.children.length) return false
+  if (n.classList.some((c) => NAMED_WIDTH.test(c))) return false
+  // A pinned box is sized by its edges, not by its parent: with both horizontal
+  // edges pinned the offsets *are* the width, so no width class belongs beside
+  // them (see `widthOpts`). One edge pinned only means the box shrink-wraps and
+  // its measured width is real.
+  if (n.style.position === 'absolute' || n.style.position === 'fixed') return false
+  const parent = n.parent ? ctx.ir.nodes[n.parent] : null
+  if (!parent) return false
+  // A grid item is sized by its track, and the track count is what the source
+  // varied: the card measured 458px when `md:grid-cols-2` gave two tracks, and
+  // the same card is 280px under `lg:grid-cols-4`. Writing the measurement
+  // freezes the narrow branch's item width and overflows the wide track.
+  if (parent.style.display === 'grid' && parent.classList.some((c) => /grid-cols-/.test(c))) return true
+  const edge = (side: 'Left' | 'Right') =>
+    (parseFloat(parent.style[`padding${side}`]) || 0) + (parseFloat(parent.style[`border${side}Width`]) || 0)
+  const content = parent.box.w - edge('Left') - edge('Right')
+  if (Math.abs(n.box.w - content) > 1.5) return false
+  const x = parent.box.x + edge('Left')
+  return Math.abs(n.box.x - x) <= 1.5
+}
+
+/**
  * The classes a node actually carries.
  *
  * One function so the repeat diff and the emitter agree on what "these two
@@ -146,26 +289,46 @@ function emittedClasses(n: NodeIR, ctx: Ctx): string[] {
     // (padding, border, background, shadow) is emitted too: `cn` is
     // tailwind-merge, so the className a component appends overrides its base
     // per property rather than doubling it.
-    return classNames(n.style, { component: true })
+    //
+    // The type scale is the exception that has to be stated explicitly rather
+    // than left to a child: `Card` ships `text-sm` and `Button` `text-sm
+    // font-medium`, neither of which the source page measured, and the text
+    // inside is on child nodes that inherit it. Left alone, every card renders
+    // 14px where the page had 16.
+    const out = [
+      ...classNames(n.style, { component: true, ...widthOpts(n, ctx) }),
+      ...chromeOverrides(n.style),
+      ...typeClasses(n.style),
+    ]
+    // A component's base can pin its own descendants at `!important` — `Badge`
+    // ships `[&>svg]:size-3!` — and a child's own class cannot out-specify that.
+    // Restating the measured size through the same descendant selector on the
+    // component does: the component's base comes first in `cn`'s argument list,
+    // so Tailwind emits the later rule last. Done here rather than in
+    // `classAttrs` because a repeat member's class becomes a slot *value*, and
+    // `classAttrs` returns before this point on that path — which is how a
+    // repeat-rendered badge kept the 12px base size over the source's 15px.
+    const icons = n.children.map((id) => ctx.ir.nodes[id]).filter((c) => c?.visible && c.kind === 'icon')
+    const sizes = new Set(icons.map((c) => iconSize(c)))
+    if (sizes.size === 1) out.push(`[&>svg]:${[...sizes][0]}`)
+    return out
   }
   // A text leaf is styled by the type scale, not by the box model.
-  if (n.text && !n.children.length) return textClasses(n.style)
-  // An absolutely positioned node carries its own offsets, not a flow size.
-  return classNames(n.style, { skipSize: n.style.position === 'absolute' })
+  if (n.text && !n.children.length) return textClasses(n.style, { sourceClasses: n.classList })
+  // A container that paints its own text — the header bar whose copy sits beside
+  // its icons — has to state the type scale too, or the text inherits whatever
+  // the nearest ancestor set. That is 33 nodes on one page whose copy rendered
+  // at the wrong size, weight and leading while their own box was correct.
+  // `classNames` reads the position itself: an absolutely positioned box keeps
+  // its measured size only where the source did not pin both edges.
+  const opts = widthOpts(n, ctx)
+  return n.text ? [...classNames(n.style, opts), ...typeClasses(n.style)] : classNames(n.style, opts)
 }
 
 function classAttrs(n: NodeIR, ctx: Ctx): string[] {
   const slot = slotOf(ctx, n.id, 'class')
   if (slot) return [`className={${slot.key}}`]
   const names = emittedClasses(n, ctx)
-  // A component's base can pin its own descendants at `!important` — `Badge`
-  // ships `[&>svg]:size-3!` — and a child's own class cannot out-specify that.
-  // Restating the measured size as the same descendant selector on the component
-  // does, because the component's base comes first in `cn`'s argument list and
-  // Tailwind emits the later rule last.
-  const icons = n.children.map((id) => ctx.ir.nodes[id]).filter((c) => c?.visible && c.kind === 'icon')
-  const sizes = new Set(icons.map((c) => iconSize(c)))
-  if (isComponent(n, ctx) && sizes.size === 1) names.push(`[&>svg]:${[...sizes][0]}`)
   return names.length ? [`className="${names.join(' ')}"`] : []
 }
 
@@ -190,7 +353,13 @@ function rawSvg(n: NodeIR, ctx: Ctx): string {
     .join('')
 
   const viewBox = shape.viewBox ?? `0 0 ${w} ${h}`
-  return `<svg ${stitchAttr(n)} width="${w}" height="${h}" viewBox="${viewBox}" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">${kids}</svg>`
+  // A verbatim SVG draws in `currentColor`, so the colour has to be stated or
+  // the mark inherits the nearest text colour. A source illustration or brand
+  // mark painted white or amber rendered in the page's near-black instead, which
+  // is the whole difference for a logo on a dark header.
+  const paint = textClasses(n.style).find((c) => /^text-(?!\[[\d.]+px\])/.test(c) && c !== 'text-foreground')
+  const attrs = [stitchAttr(n), paint ? `className="${paint}"` : ''].filter(Boolean).join(' ')
+  return `<svg ${attrs} width="${w}" height="${h}" viewBox="${viewBox}" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">${kids}</svg>`
 }
 
 function iconJsx(n: NodeIR, cls: Classification, ctx: Ctx): string {
@@ -228,6 +397,23 @@ function iconJsx(n: NodeIR, cls: Classification, ctx: Ctx): string {
     : iconSize(n)
   const tint = textClasses(n.style).find((c) => /^text-(?!\[[\d.]+px\])/.test(c) && c !== 'text-foreground')
   const classes = [sized, tint].filter(Boolean)
+  // The ligature's element is the glyph's own span, and the icon font lays that
+  // span out as a block with no case folding of its own. The `<svg>` that
+  // replaced it is laid out by the icon component's own base, not by the span's
+  // classes, so the two properties that still move it are stated here.
+  if (n.ligature) {
+    if (n.style.display === 'block') classes.push('block')
+    if (n.style.textTransform === 'none') classes.push('normal-case')
+    const lh = n.style.lineHeight
+    if (lh && lh !== 'normal' && /[\d.]/.test(lh) && !lh.includes('%')) classes.push(`leading-[${lh.replace(/\s+/g, '_')}]`)
+    // A positioned ligature — the search field's `absolute left-3` icon — needs
+    // its offsets here too, for the same reason.
+    classes.push(...positionClasses(n.style))
+    // Every icon component ships `overflow-hidden` for its own viewBox, which
+    // here clips nothing the span did not already clip and shows up as a change
+    // against a source node that measured `visible`.
+    if (n.style.overflow === 'visible') classes.push('overflow-visible')
+  }
   const attrs = [stitchAttr(n)]
   if (classes.length) attrs.push(`className="${classes.join(' ')}"`)
 
@@ -242,14 +428,61 @@ function imageJsx(n: NodeIR, ctx: Ctx): string {
   return `<ImagePlaceholder ${attrs.join(' ')} />`
 }
 
+/**
+ * Source tags a text leaf may keep. The source HTML is the truth for what an
+ * element *is*: emitting its `<p>`, `<a>`, `<h1>` or `<strong>` as a `<span>`
+ * loses the line box, the inline semantics and every attribute the diff would
+ * otherwise align on. Only tags that carry text without needing attributes of
+ * their own are here — anything else (a `div` that is really a layout wrapper)
+ * keeps the neutral span.
+ */
+const TEXT_TAG = new Set([
+  'p', 'span', 'a', 'strong', 'em', 'b', 'i', 'small', 'label', 'li',
+  'dt', 'dd', 'figcaption', 'blockquote', 'code', 'pre',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+])
+
 function textJsx(n: NodeIR, ctx: Ctx): string {
-  const attrs = [stitchAttr(n), ...classAttrs(n, ctx)]
-  return `<span ${attrs.join(' ')}>${textInner(n, ctx)}</span>`
+  const tag = TEXT_TAG.has(n.tag) ? n.tag : 'span'
+  const attrs = [stitchAttr(n)]
+  if (tag === 'a' && n.href) attrs.push(`href="${esc(n.href)}"`)
+  attrs.push(...classAttrs(n, ctx))
+  return `<${tag} ${attrs.join(' ')}>${textInner(n, ctx)}</${tag}>`
 }
 
 /** A node's own text and children, in the order the source had them. */
 function bodyWithText(n: NodeIR, ctx: Ctx): string {
   const kids = n.children.map((cid) => nodeJsx(ctx.ir.nodes[cid], ctx, {}))
+  // When the source ran text *around* an element — `…berlangsung • <span>38 Lot
+  // Aktif</span> • Proteksi…` — the flattened `text` loses the span's position
+  // and the emitter can only put the whole string on one side of it. The runs
+  // list keeps every text gap, so each goes back where it was. Emitted as
+  // expressions: a JSX text literal would drop the boundary spaces the runs
+  // exist to preserve.
+  const runs = n.text ? n.textRuns : null
+  if (runs && runs.filter((r) => r.trim()).length > 1) {
+    const slot = slotOf(ctx, n.id, 'text')
+    let placed = false
+    const parts: string[] = []
+    const push = (s: string) => {
+      if (!s) return
+      if (slot) {
+        // A slot replaces the node's whole text, so it takes the first gap.
+        if (!placed) {
+          placed = true
+          parts.push(`{${slot.key}}`)
+        }
+      } else {
+        parts.push(`{${JSON.stringify(s)}}`)
+      }
+    }
+    for (let i = 0; i < kids.length; i++) {
+      push(runs[i] ?? '')
+      parts.push(kids[i])
+    }
+    push(runs[kids.length] ?? '')
+    return parts.join('')
+  }
   const text = textInner(n, ctx)
   if (!text) return kids.join('')
   // `textAt` counts element children, so an icon drawn before the label keeps
@@ -259,14 +492,34 @@ function bodyWithText(n: NodeIR, ctx: Ctx): string {
   return kids.join('')
 }
 
-function elementJsx(n: NodeIR, ctx: Ctx): string {
-  const attrs = [stitchAttr(n)]
+/**
+ * Source tags a container may keep. The source HTML is the truth for what an
+ * element *is*: every `<header>`, `<main>`, `<nav>`, `<footer>`, `<a>` and `<h1>`
+ * source had rendered as a `<div>`, so the page was a soup of divs with none of
+ * its landmark structure, and the diff had no tag to align on. Tags whose
+ * behaviour depends on attributes the IR does not keep (a form's `action`, a
+ * table cell's `colspan`, an image's `src`) are deliberately absent and fall
+ * back to `div`.
+ */
+const LANDMARK = new Set([
+  'div', 'span', 'header', 'main', 'nav', 'footer', 'section', 'article',
+  'aside', 'address', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'blockquote',
+  'pre', 'code', 'figure', 'figcaption', 'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+  'a', 'strong', 'em', 'b', 'i', 'small', 'label', 'time', 'mark', 'cite',
+  'q', 's', 'u', 'sup', 'sub', 'abbr', 'details', 'summary', 'table',
+  'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
+])
+
+function elementJsx(n: NodeIR, ctx: Ctx, extraAttrs: string[] = [], tag?: string): string {
+  const name = tag ?? (LANDMARK.has(n.tag) ? n.tag : 'div')
+  const attrs = [stitchAttr(n), ...extraAttrs]
   if (n.ariaLabel) attrs.push(`aria-label="${n.ariaLabel}"`)
+  if (name === 'a' && n.href) attrs.push(`href="${esc(n.href)}"`)
   attrs.push(...classAttrs(n, ctx))
 
   const body = bodyWithText(n, ctx)
-  if (!body) return `<div ${attrs.join(' ')} />`
-  return `<div ${attrs.join(' ')}>${body}</div>`
+  if (!body) return `<${name} ${attrs.join(' ')} />`
+  return `<${name} ${attrs.join(' ')}>${body}</${name}>`
 }
 
 function componentJsx(n: NodeIR, cls: Classification, ctx: Ctx): string {
@@ -332,8 +585,26 @@ function nodeJsx(n: NodeIR, ctx: Ctx, opts: Opts): string {
     // A placeholder is the only text an empty field shows, and the source page
     // shows it — dropping it leaves a visibly blank input in the diff.
     if (n.placeholder) attrs.push(`placeholder="${n.placeholder}"`)
-    if (/input|textarea|select/.test(n.tag)) attrs.push('className="border border-input"')
-    return `<${n.tag} ${attrs.join(' ')} />`
+    if (/input|textarea|select/.test(n.tag)) {
+      // The border is the source's, not shadcn's: a search field the page drew
+      // borderless must not gain a hairline. A browser gives a bare `<input>` a
+      // 2px inset ridge, which is not the page's drawing either, so only a real
+      // measured line earns a border class.
+      const classes = classNames(n.style, { ...widthOpts(n, ctx) })
+      if (parseFloat(n.style.borderWidth) > 0) {
+        if (n.style.borderStyle !== 'none') classes.push('border-input')
+      } else classes.push('border-0')
+      if (classes.length) attrs.push(`className="${classes.join(' ')}"`)
+      return `<${n.tag} ${attrs.join(' ')} />`
+    }
+    // A `<button>` is not a void element, and this path met one carrying an icon
+    // child — a voice-search button emitted as `<button aria-label="…" />`,
+    // which renders as an empty control with the mic silently gone. A control
+    // only self-closes when it is really childless. `elementJsx` re-derives the
+    // stitch id and aria-label itself, so only the placeholder is passed on.
+    if (!n.children.length) return `<${n.tag} ${attrs.join(' ')} />`
+    const extra = n.placeholder ? [`placeholder="${n.placeholder}"`] : []
+    return elementJsx(n, ctx, extra, n.tag)
   }
 
   if (n.text && !n.children.length) return textJsx(n, ctx)
@@ -460,6 +731,7 @@ export function emit(ir: IR, classes: Map<string, Classification>): EmitResult {
     repeats: new Map(),
     slots: new Map(),
     usedNames: new Set(),
+    varying: breakpointVarying(ir),
   }
 
   // The class emitter resolves colours against this palette, so it has to be set

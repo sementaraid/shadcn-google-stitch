@@ -4,8 +4,8 @@ import type { NodeIR } from '../src/types.ts'
 
 function node(id: string, text: string | null, fontFamily: string, kind: NodeIR['kind'] = 'text'): NodeIR {
   return {
-    id, path: id, tag: 'span', classList: [], role: null, ariaLabel: null, placeholder: null,
-    text, textAt: 0, box: { x: 0, y: 0, w: 15, h: 15 },
+    id, path: id, tag: 'span', classList: [], role: null, ariaLabel: null, placeholder: null, href: null,
+    text, textAt: 0, textRuns: null, box: { x: 0, y: 0, w: 15, h: 15 },
     style: { fontFamily } as NodeIR['style'], children: [], parent: null, depth: 0,
     visible: true, kind, repeat: null, isLeafOpaque: false, iconShape: null, ligature: null, cropPath: null,
   }

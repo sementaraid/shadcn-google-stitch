@@ -30,6 +30,24 @@ export function toHex(value: string | null | undefined): string | null {
   return `#${h(r)}${h(g)}${h(b)}`
 }
 
+/**
+ * The alpha a computed colour carries, 0..1.
+ *
+ * Kept apart from `toHex` because the two answer different questions. `toHex`
+ * identifies a colour for the palette, where a 10% wash and the solid it washes
+ * are the same hue. The emitter needs the alpha itself: a `rgba(183,0,17,0.1)`
+ * badge painted as `bg-[#b70011]` is a solid crimson pill where the source had a
+ * barely-there tint, which is a far bigger visual error than either colour is.
+ */
+export function alphaOf(value: string | null | undefined): number {
+  if (!value) return 1
+  const m = /^rgba\(([^)]+)\)$/.exec(value.trim())
+  if (!m) return 1
+  const parts = m[1].split(',').map((s) => parseFloat(s))
+  const a = parts[3]
+  return Number.isFinite(a) ? Math.max(0, Math.min(1, a)) : 1
+}
+
 /** The IR carries `rgb()`, the palette holds hex. One conversion, in one place. */
 export const hexOf = (value: string | null | undefined): string | null => toHex(value)
 

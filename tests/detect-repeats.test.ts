@@ -2,12 +2,13 @@ import assert from 'node:assert/strict'
 import { detectRepeats } from '../src/extract.ts'
 import type { NodeIR, StyleSubset } from '../src/types.ts'
 
-const style = { display: 'flex', flexDirection: 'row' } as StyleSubset
+const style = { display: 'flex', flexDirection: 'row' } as unknown as StyleSubset
 
 function node(id: string, parent: string | null, children: string[], w = 300, h = 200): NodeIR {
   return {
-    id, path: id, tag: 'div', classList: [], role: null, ariaLabel: null, placeholder: null, text: null,
+    id, path: id, tag: 'div', classList: [], role: null, ariaLabel: null, placeholder: null, href: null, text: null,
     textAt: null,
+    textRuns: null,
     box: { x: 0, y: 0, w, h }, style, children, parent, depth: 0,
     visible: true, kind: 'container', repeat: null, isLeafOpaque: false, iconShape: null, ligature: null, cropPath: null,
   }
