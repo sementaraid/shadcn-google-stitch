@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  // Vendored shadcn sources are copied verbatim for the codegen tool to read and
+  // emit. They target the generated project's own tsconfig (with its `cn` and
+  // `radix-ui` deps), so they are reference data here, not part of this program.
+  "exclude": ["src/registry/shadcn/components", "src/registry/shadcn/lib"]
+}

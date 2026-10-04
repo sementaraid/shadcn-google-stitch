@@ -1,0 +1,37 @@
+{
+  "name": "stitch-to-react",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "stitch": "./src/cli.ts"
+  },
+  "scripts": {
+    "stitch": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx tests/run.ts",
+    "eval": "tsx src/cli.ts eval fixtures",
+    "sync-lucide": "tsx scripts/sync-lucide.ts",
+    "sync-registry": "tsx scripts/sync-registry.ts",
+    "shoot": "tsx tests/shoot.ts"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "culori": "^4.0.2",
+    "pixelmatch": "^7.2.0",
+    "playwright": "^1.48.0",
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "@types/pngjs": "^6.0.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "lucide-react": "^0.545.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "ts-morph": "^28.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
