@@ -494,7 +494,7 @@ export function classNames(style: StyleSubset, opts: ClassOptions = {}): string[
 
   out.push(...sizeClamp(style, !!opts.component))
 
-  out.push(...positionClasses(style))
+  out.push(...positionClasses(style, src))
 
   return out
 }
@@ -574,7 +574,7 @@ const SIDES = ['top', 'right', 'bottom', 'left'] as const
  * `classNames` — a text leaf is emitted as a `<span>` through `textClasses` and
  * needs the same offsets as any other positioned box.
  */
-export function positionClasses(style: StyleSubset): string[] {
+export function positionClasses(style: StyleSubset, sourceClasses: string[] = []): string[] {
   const pos = style.position
   const out: string[] = []
   if (pos === 'absolute') out.push('absolute')
@@ -587,11 +587,26 @@ export function positionClasses(style: StyleSubset): string[] {
   const at = (side: (typeof SIDES)[number]) => style[side] ?? 'auto'
 
   if (pos === 'absolute' || pos === 'fixed') {
-    for (const side of SIDES) {
-      const v = at(side)
-      if (v === 'auto') continue
-      const n = nums(v)[0]
-      if (n !== undefined) out.push(n === 0 ? `${side}-0` : `${side}-[${n}px]`)
+    // Chrome reports *used* values for all four insets, and the ones the source
+    // left `auto` are derived from the element's own size — so a fixed header
+    // with only `top-0 left-0` measures `bottom: 1519px` (viewport minus its
+    // height). Emitting that pins the box to the capture's height. Where the
+    // source named any inset, it is the truth for which edges are pinned and the
+    // rest stay `auto`; the measurement is only the fallback for a positioned
+    // element that names none.
+    const named = sourceClasses.filter((c) => {
+      const bare = RESPONSIVE_RE.test(c) ? c.slice(c.indexOf(':') + 1) : c
+      return /^(?:top|right|bottom|left|inset|start|end)-/.test(bare)
+    })
+    if (named.length) {
+      out.push(...named)
+    } else {
+      for (const side of SIDES) {
+        const v = at(side)
+        if (v === 'auto') continue
+        const n = nums(v)[0]
+        if (n !== undefined) out.push(n === 0 ? `${side}-0` : `${side}-[${n}px]`)
+      }
     }
   }
 
@@ -670,7 +685,7 @@ export function textClasses(style: StyleSubset, opts: ClassOptions = {}): string
   // above it.
   out.push(...src.filter((c) => RESPONSIVE_RE.test(c)))
   out.push(...sizeClamp(style, false))
-  out.push(...positionClasses(style))
+  out.push(...positionClasses(style, src))
   // A text run clips for a reason — the one-line ellipsis, the fixed-height
   // label — and this path never reached the overflow rule above.
   const ov = overflowClass(style)

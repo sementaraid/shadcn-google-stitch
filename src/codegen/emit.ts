@@ -408,7 +408,7 @@ function iconJsx(n: NodeIR, cls: Classification, ctx: Ctx): string {
     if (lh && lh !== 'normal' && /[\d.]/.test(lh) && !lh.includes('%')) classes.push(`leading-[${lh.replace(/\s+/g, '_')}]`)
     // A positioned ligature — the search field's `absolute left-3` icon — needs
     // its offsets here too, for the same reason.
-    classes.push(...positionClasses(n.style))
+    classes.push(...positionClasses(n.style, n.classList))
     // Every icon component ships `overflow-hidden` for its own viewBox, which
     // here clips nothing the span did not already clip and shows up as a change
     // against a source node that measured `visible`.
